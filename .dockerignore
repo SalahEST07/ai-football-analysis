@@ -1,0 +1,39 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+venv/
+.venv/
+*.egg
+
+# Node (frontend has its own Dockerfile context)
+frontend/node_modules
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data & datasets (large files — not needed in image)
+data/
+dataset/
+mlflow.db
+mlruns/
+
+# Docker
+docker-compose*.yml
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Gemini / AI
+.gemini/
+.agents/

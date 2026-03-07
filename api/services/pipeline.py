@@ -258,10 +258,12 @@ class IntegratedPipeline:
         """
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
+            print(f"ERROR: Cannot open video: {video_path}")
             raise FileNotFoundError(f"Cannot open video: {video_path}")
 
         total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+        print(f"INFO: Video opened. FPS={fps}, Total Frames={total_video_frames}")
 
         possession_counter = {"Team A": 0, "Team B": 0}
         player_positions: dict[int, list[dict]] = defaultdict(list)   # id -> [{frame, x, y, team}]
@@ -273,6 +275,8 @@ class IntegratedPipeline:
         while True:
             ret, frame = cap.read()
             if not ret:
+                if frame_idx == 0:
+                    print("ERROR: Failed to read the very first frame!")
                 break
 
             frame_idx += 1

@@ -1,0 +1,47 @@
+# ──────────────────────────────────────────────────────────────
+# Docker Compose — Football AI Analytics
+# ──────────────────────────────────────────────────────────────
+# Usage:
+#   docker-compose up --build        (build & start)
+#   docker-compose up -d             (detached mode)
+#   docker-compose down              (stop & remove)
+#   docker-compose logs -f backend   (tail backend logs)
+# ──────────────────────────────────────────────────────────────
+
+services:
+  # ── FastAPI Backend ──
+  backend:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: football-api
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_PATH=models/best.pt
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Mount models directory so you can swap models without rebuilding
+      - ./models:/app/models:ro
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── React Frontend (served via nginx) ──
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_API_BASE: "/api"
+    container_name: football-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

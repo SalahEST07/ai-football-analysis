@@ -129,7 +129,13 @@ async def analyze_video(
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     content = await file.read()
     tmp.write(content)
+    tmp.flush()
+    tmp_path = tmp.name
     tmp.close()
+
+    # Debug: Check file existence and size
+    size = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else -1
+    print(f"DEBUG: Saved upload to {tmp_path} (exists: {os.path.exists(tmp_path)}, size: {size} bytes)")
 
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
@@ -144,7 +150,7 @@ async def analyze_video(
 
     # fire and forget — runs in thread pool so we don't block the event loop
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(executor, _run_pipeline, job_id, tmp.name, max_frames)
+    loop.run_in_executor(executor, _run_pipeline, job_id, tmp_path, max_frames)
 
     return JobInfo(
         job_id=job_id,
