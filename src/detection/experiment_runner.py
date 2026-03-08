@@ -38,7 +38,10 @@ def run_experiment(conf=0.25, imgsz=640):
 # =========================
 # MLflow Tracking
 # =========================
-with mlflow.start_run():
+mlflow.set_tracking_uri("sqlite:///mlflow.db")
+mlflow.set_experiment("Football_Video_Analysis")
+
+with mlflow.start_run(run_name="Hyperparameter_Test"):
 
     conf = 0.25
     imgsz = 640

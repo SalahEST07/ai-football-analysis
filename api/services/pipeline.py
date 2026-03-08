@@ -8,7 +8,11 @@ data structures that FastAPI can serialise to JSON.
 
 import cv2
 import math
+import os
+import subprocess
+import tempfile
 import numpy as np
+import mlflow
 from ultralytics import YOLO
 from sklearn.cluster import KMeans
 from collections import defaultdict
@@ -120,9 +124,10 @@ class CentroidTracker:
 # ──────────────────────────────────────────────
 # Team Classifier
 # ──────────────────────────────────────────────
-BALL_LABELS = {"ball", "sports ball", "soccer ball", "football"}
-REFEREE_LABELS = {"referee", "official", "ref"}
-PLAYER_LABELS = {"player", "person"}
+BALL_LABELS     = {"ball", "sports ball", "soccer ball", "football"}
+REFEREE_LABELS  = {"referee", "official", "ref"}
+PLAYER_LABELS   = {"player", "person", "goalkeeper", "goalie"}  # include goalkeeper!
+MIN_CONFIDENCE  = 0.25   # ignore detections below this threshold
 TEAM_SAMPLE_MIN = 60
 TEAM_COLOR_MATCH_THRESHOLD = 45
 
@@ -231,7 +236,54 @@ class IntegratedPipeline:
     def _distance(p1, p2):
         return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
 
-    # ---- main entry ----
+    @staticmethod
+    def _ensure_readable(video_path: str) -> tuple:
+        """
+        Check that OpenCV can decode frames from 'video_path'.
+        If not (e.g. H.264 codec not available in headless OpenCV),
+        transcode to MJPEG AVI via system ffmpeg and return the new path.
+        Returns (path_to_use, was_transcoded).
+        """
+        cap = cv2.VideoCapture(video_path)
+        readable = False
+        if cap.isOpened():
+            ret, _ = cap.read()
+            readable = ret
+        cap.release()
+
+        if readable:
+            print(f"INFO: Video is readable by OpenCV directly: {video_path}")
+            return video_path, False
+
+        # Fallback: transcode with ffmpeg to MJPEG inside a temp AVI
+        print(f"WARNING: OpenCV cannot decode '{video_path}'. "
+              f"Transcoding to MJPEG via ffmpeg...")
+        tmp = tempfile.NamedTemporaryFile(suffix='.avi', delete=False)
+        tmp.close()
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', video_path,
+            '-vcodec', 'mjpeg',
+            '-q:v', '3',       # quality 1-31; lower = better
+            '-an',             # drop audio — not needed
+            tmp.name,
+        ]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, timeout=600
+            )
+            if result.returncode == 0:
+                print(f"INFO: Transcoding succeeded -> {tmp.name}")
+                return tmp.name, True
+            else:
+                err = result.stderr.decode(errors='replace')[-500:]
+                print(f"ERROR: ffmpeg transcoding failed: {err}")
+        except Exception as exc:
+            print(f"ERROR: ffmpeg transcoding error: {exc}")
+
+        # Last resort — try original path anyway
+        return video_path, False
+
     def run(
         self,
         video_path: str,
@@ -256,10 +308,26 @@ class IntegratedPipeline:
             frames_processed, total_video_frames, fps,
             possession, player_tracking, ball_tracking
         """
-        cap = cv2.VideoCapture(video_path)
+        # MLflow setup — all calls are best-effort; failures must never crash the pipeline
+        run_name = os.path.basename(video_path)
+        active_run = None
+        try:
+            mlflow.set_tracking_uri("sqlite:////app/mlflow-storage/mlflow.db")
+            mlflow.set_experiment("Football_Video_Analysis")
+            active_run = mlflow.start_run(run_name=f"Run: {run_name}")
+            mlflow.log_param("video_file", run_name)
+            mlflow.log_param("max_frames_requested", max_frames)
+        except Exception as e:
+            print(f"WARNING: MLflow setup failed (tracking disabled for this run): {e}")
+            active_run = None
+
+        # Ensure OpenCV can decode the video; transcode via ffmpeg if needed
+        work_path, was_transcoded = self._ensure_readable(video_path)
+
+        cap = cv2.VideoCapture(work_path)
         if not cap.isOpened():
-            print(f"ERROR: Cannot open video: {video_path}")
-            raise FileNotFoundError(f"Cannot open video: {video_path}")
+            print(f"ERROR: Cannot open video: {work_path}")
+            raise FileNotFoundError(f"Cannot open video: {work_path}")
 
         total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
@@ -289,9 +357,15 @@ class IntegratedPipeline:
             det_data = []
             ball_pos = None
 
+            debug_counts = {"player": 0, "ball": 0, "referee": 0, "skipped": 0}
+
             for box in results.boxes:
                 cls = int(box.cls[0])
                 conf = float(box.conf[0])
+                if conf < MIN_CONFIDENCE:
+                    debug_counts["skipped"] += 1
+                    continue
+
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 raw_label = self.model.names[cls].lower()
 
@@ -302,12 +376,19 @@ class IntegratedPipeline:
                 elif raw_label in REFEREE_LABELS:
                     obj_cls = "referee"
                 else:
-                    obj_cls = raw_label
+                    obj_cls = raw_label  # keep as-is (e.g. "goalkeeper" falls here only if not in PLAYER_LABELS)
 
                 if obj_cls in {"player", "ball", "referee"}:
                     cx, cy = self._center(x1, y1, x2, y2)
                     centroids.append(((cx, cy), obj_cls))
                     det_data.append((x1, y1, x2, y2, cx, cy, obj_cls, conf))
+                    debug_counts[obj_cls] = debug_counts.get(obj_cls, 0) + 1
+
+            # Print detection summary every 60 frames
+            if frame_idx % 60 == 0 or frame_idx == 1:
+                print(f"DEBUG frame {frame_idx}: raw_detections={len(results.boxes)} | "
+                      f"players={debug_counts['player']} balls={debug_counts['ball']} "
+                      f"refs={debug_counts['referee']} skipped(low-conf)={debug_counts['skipped']}")
 
             tracked = self.tracker.update(centroids)
 
@@ -370,6 +451,14 @@ class IntegratedPipeline:
 
         cap.release()
 
+        # Clean up the transcoded temp file if one was created
+        if was_transcoded:
+            try:
+                os.unlink(work_path)
+                print(f"INFO: Cleaned up transcoded temp file: {work_path}")
+            except OSError:
+                pass
+
         # ---- compile results ----
         total_pos = possession_counter["Team A"] + possession_counter["Team B"]
         if total_pos > 0:
@@ -388,7 +477,7 @@ class IntegratedPipeline:
                 "positions": positions,
             }
 
-        return {
+        result = {
             "frames_processed": frame_idx,
             "total_video_frames": total_video_frames,
             "fps": fps,
@@ -402,3 +491,19 @@ class IntegratedPipeline:
             "player_tracking": tracking_data,
             "ball_tracking": ball_positions,
         }
+
+        # Log completion metrics to MLflow
+        if active_run:
+            try:
+                mlflow.log_metric("frames_processed", result["frames_processed"])
+                mlflow.log_metric("fps", result["fps"])
+                mlflow.log_metric("players_tracked", result["players_tracked"])
+                mlflow.log_metric("ball_detections", len(result["ball_tracking"]))
+                mlflow.log_metric("possession_team_a", result["possession"]["team_a"])
+                mlflow.log_metric("possession_team_b", result["possession"]["team_b"])
+                mlflow.end_run()
+            except Exception as e:
+                print(f"WARNING: Could not log metrics to MLflow: {e}")
+                mlflow.end_run()
+
+        return result

@@ -1,0 +1,23 @@
+artifact_path: file:C:/Users/SBS/Desktop/ai-football-analysis/mlruns/2/models/m-ec95ba78db1f4a7aa6493f7fd9f32ce8/artifacts
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.14.3
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.8.0
+    skops_trusted_types: null
+mlflow_version: 3.10.0
+model_id: m-ec95ba78db1f4a7aa6493f7fd9f32ce8
+model_size_bytes: 51026
+model_uuid: m-ec95ba78db1f4a7aa6493f7fd9f32ce8
+prompts: null
+run_id: 310c276baeeb4b3e9a7967b1603dff5c
+utc_time_created: '2026-03-06 13:14:05.479479'

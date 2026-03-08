@@ -11,6 +11,7 @@ FastAPI application with:
 
 import asyncio
 import os
+import shutil
 import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -91,12 +92,14 @@ def _run_pipeline(job_id: str, video_path: str, max_frames: int | None):
         jobs[job_id]["status"] = JobStatus.FAILED
         jobs[job_id]["error"] = str(exc)
     finally:
-        # clean up temp file
-        try:
-            os.unlink(video_path)
-        except OSError:
-            pass
+        pass
 
+
+# ──────────────────────────────────────────────
+# Shared upload directory
+# ──────────────────────────────────────────────
+UPLOAD_DIR = "shared_videos"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ──────────────────────────────────────────────
 # Routes
@@ -114,6 +117,56 @@ def health():
     return HealthResponse(status="ok", model_loaded=True, active_jobs=active)
 
 
+@app.get("/debug-model", tags=["debug"])
+def debug_model():
+    """
+    Test the YOLO model on the first frame of the first video in shared_videos.
+    Visit http://localhost:8000/debug-model to diagnose detection issues.
+    """
+    import glob
+    videos = (
+        glob.glob(f"{UPLOAD_DIR}/*.mp4") +
+        glob.glob(f"{UPLOAD_DIR}/*.avi") +
+        glob.glob(f"{UPLOAD_DIR}/*.mkv")
+    )
+    if not videos:
+        return {"error": f"No videos found in '{UPLOAD_DIR}'. Upload a video first."}
+
+    video_path = videos[0]
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return {"error": f"OpenCV could not open: {video_path}"}
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    ret, frame = cap.read()
+    cap.release()
+
+    if not ret:
+        return {"error": f"Could not read first frame from: {video_path}"}
+
+    results = model(frame)[0]
+    detections = []
+    for box in results.boxes:
+        cls = int(box.cls[0])
+        conf = float(box.conf[0])
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        detections.append({
+            "label": model.names[cls],
+            "confidence": round(conf, 3),
+            "bbox": [x1, y1, x2, y2],
+        })
+
+    return {
+        "video":          video_path,
+        "frame_shape":    list(frame.shape),
+        "total_frames":   total_frames,
+        "fps":            fps,
+        "model_classes":  model.names,
+        "total_detections": len(detections),
+        "detections":     detections,
+    }
+
 # ---- Async Video Analysis ----
 @app.post("/analyze-video", response_model=JobInfo, tags=["analysis"])
 async def analyze_video(
@@ -124,18 +177,14 @@ async def analyze_video(
     Upload a match video clip.  Processing runs **asynchronously** — you get
     back a `job_id` immediately and poll `/jobs/{job_id}` for progress.
     """
-    # save to temp file
-    suffix = os.path.splitext(file.filename or ".mp4")[1]
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    content = await file.read()
-    tmp.write(content)
-    tmp.flush()
-    tmp_path = tmp.name
-    tmp.close()
+    # Save the file to the shared upload directory
+    video_path = os.path.join(UPLOAD_DIR, file.filename)
+    with open(video_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
     # Debug: Check file existence and size
-    size = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else -1
-    print(f"DEBUG: Saved upload to {tmp_path} (exists: {os.path.exists(tmp_path)}, size: {size} bytes)")
+    size = os.path.getsize(video_path) if os.path.exists(video_path) else -1
+    print(f"DEBUG: Saved upload to {video_path} (exists: {os.path.exists(video_path)}, size: {size} bytes)")
 
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
@@ -148,9 +197,9 @@ async def analyze_video(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # fire and forget — runs in thread pool so we don't block the event loop
+    # fire and forget — runs in thread pool
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(executor, _run_pipeline, job_id, tmp_path, max_frames)
+    loop.run_in_executor(executor, _run_pipeline, job_id, video_path, max_frames)
 
     return JobInfo(
         job_id=job_id,

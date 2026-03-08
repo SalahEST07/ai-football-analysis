@@ -21,15 +21,38 @@ services:
       - MODEL_PATH=models/best.pt
       - PYTHONUNBUFFERED=1
     volumes:
-      # Mount models directory so you can swap models without rebuilding
+      # Mount models and source code for live-swapping/reloading
       - ./models:/app/models:ro
+      - ./api:/app/api
+      - ./src:/app/src
+      # Persistent storage for match data, results, and ML tracking
+      - ./shared_videos:/app/shared_videos
+      - ./data:/app/data
+      - ./dataset:/app/dataset
+      - ./runs:/app/runs
+      - ./mlruns:/app/mlruns
+      - mlflow-data:/app/mlflow-storage
     restart: unless-stopped
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/api --reload-dir /app/src
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── MLflow UI (Experiment Tracking) ──
+  mlflow:
+    image: python:3.11-slim
+    container_name: football-mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/mlruns
+      - mlflow-data:/mlflow-storage
+    command: >
+      sh -c "pip install --quiet mlflow && mlflow ui --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:////mlflow-storage/mlflow.db"
+    restart: unless-stopped
 
   # ── React Frontend (served via nginx) ──
   frontend:
@@ -41,7 +64,12 @@ services:
     container_name: football-frontend
     ports:
       - "3000:80"
+    volumes:
+      - ./shared_videos:/usr/share/nginx/html/videos:ro
     depends_on:
       backend:
         condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  mlflow-data:
